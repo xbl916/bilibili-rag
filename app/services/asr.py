@@ -1,7 +1,7 @@
 """
-Bilibili RAG 知识库系统
+Bilibili Wiki 知识库系统
 
-ASR 服务 - 使用 DashScope 录音文件识别
+ASR 服务 - 支持 DashScope 和本地 OpenAI 格式 ASR
 """
 import asyncio
 import json
@@ -9,22 +9,17 @@ import os
 import shutil
 import subprocess
 import time
-from http import HTTPStatus
 from typing import Optional, Any
 from urllib import request as urlrequest
 
 import httpx
-import dashscope
-from dashscope.audio.asr import Transcription, Recognition
-from dashscope.common.utils import default_headers, join_url
-from dashscope.utils.oss_utils import OssUtils
 from loguru import logger
 
 from app.config import settings
 
 
 class ASRService:
-    """音频转文字服务（DashScope）"""
+    """音频转文字服务 - 支持 DashScope 和本地 OpenAI 格式 ASR"""
 
     def __init__(
         self,
@@ -32,13 +27,24 @@ class ASRService:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout: Optional[int] = None,
+        use_local: bool = False,
     ):
-        self.api_key = api_key or settings.openai_api_key
-        self.base_url = base_url or getattr(settings, "dashscope_base_url", None)
-        self.model = model or getattr(settings, "asr_model", "fun-asr")
-        self.timeout = timeout or getattr(settings, "asr_timeout", 600)
-        self.local_model = getattr(settings, "asr_model_local", self.model)
-        self.input_format = getattr(settings, "asr_input_format", "pcm")
+        self.use_local = use_local or getattr(settings, "asr_use_local", False)
+        
+        if self.use_local:
+            # 本地 OpenAI 格式 ASR
+            self.api_key = api_key or settings.local_asr_api_key
+            self.base_url = base_url or settings.local_asr_base_url
+            self.model = model or settings.local_asr_model
+            self.timeout = timeout or getattr(settings, "asr_timeout", 600)
+            logger.info("使用本地 OpenAI 格式 ASR 服务")
+        else:
+            # DashScope ASR
+            self.api_key = api_key or settings.openai_api_key
+            self.base_url = base_url or getattr(settings, "dashscope_base_url", None)
+            self.model = model or getattr(settings, "asr_model", "paraformer-v2")
+            self.timeout = timeout or getattr(settings, "asr_timeout", 600)
+            logger.info("使用 DashScope ASR 服务")
 
     def _configure(self) -> None:
         if not self.api_key:
@@ -404,11 +410,105 @@ class ASRService:
             return None
 
     async def transcribe_url(self, audio_url: str) -> Optional[str]:
+        """转写音频 URL"""
+        if self.use_local:
+            return await self._transcribe_url_local(audio_url)
         return await asyncio.to_thread(self._transcribe_sync, audio_url)
 
     async def transcribe_local_file(self, file_path: str) -> Optional[str]:
-        """本地文件直传识别（Recognition）"""
+        """本地文件直传识别"""
+        if self.use_local:
+            return await self._transcribe_local_file_local(file_path)
         return await asyncio.to_thread(self._recognize_local_file, file_path)
+
+    async def _transcribe_url_local(self, audio_url: str) -> Optional[str]:
+        """本地 OpenAI 格式 ASR - 转写音频 URL"""
+        try:
+            # 下载音频到临时文件
+            temp_dir = os.path.join("data", "asr_tmp")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            temp_file = os.path.join(temp_dir, f"audio_{int(time.time())}.wav")
+            await self._download_audio(audio_url, temp_file)
+            
+            if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
+                logger.warning(f"音频文件过小或不存在：{temp_file}")
+                return None
+            
+            # 调用本地 ASR
+            result = await self._call_local_asr(temp_file)
+            
+            # 清理临时文件
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+            
+            return result
+        except Exception as e:
+            logger.warning(f"本地 ASR 转写失败：{e}")
+            return None
+
+    async def _transcribe_local_file_local(self, file_path: str) -> Optional[str]:
+        """本地 OpenAI 格式 ASR - 转写本地文件"""
+        try:
+            result = await self._call_local_asr(file_path)
+            return result
+        except Exception as e:
+            logger.warning(f"本地 ASR 转写失败：{e}")
+            return None
+
+    async def _download_audio(self, url: str, file_path: str) -> bool:
+        """下载音频到本地文件"""
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(url)
+                if response.status_code == 200:
+                    with open(file_path, 'wb') as f:
+                        f.write(response.content)
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"下载音频失败：{e}")
+            return False
+
+    async def _call_local_asr(self, file_path: str) -> Optional[str]:
+        """调用本地 OpenAI 格式 ASR 服务"""
+        try:
+            # 使用 OpenAI 兼容的转录 API
+            url = f"{self.base_url}/v1/audio/transcriptions"
+            
+            with open(file_path, 'rb') as f:
+                files = {'file': (os.path.basename(file_path), f)}
+                data = {
+                    'model': self.model,
+                    'language': 'zh',
+                }
+                
+                headers = {
+                    'Authorization': f'Bearer {self.api_key}'
+                }
+                
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    response = await client.post(
+                        url,
+                        files=files,
+                        data=data,
+                        headers=headers
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        text = result.get('text', '')
+                        logger.info(f"本地 ASR 成功，长度={len(text)}")
+                        return text
+                    else:
+                        logger.warning(f"本地 ASR 失败：{response.status_code} - {response.text[:200]}")
+                        return None
+                        
+        except Exception as e:
+            logger.warning(f"调用本地 ASR 失败：{e}")
+            return None
 
     def _transcribe_sync_with_model(self, audio_url: str, model: str) -> Optional[str]:
         """使用指定模型转写（用于本地文件上传）"""

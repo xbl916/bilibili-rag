@@ -1,7 +1,7 @@
 """
-Bilibili RAG 知识库系统
+Bilibili Wiki 知识库系统
 
-主应用入口
+基于 Karpathy LLM Wiki 方案的主应用入口
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -33,7 +33,7 @@ logger.add(
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
-    logger.info("🚀 Bilibili RAG 知识库系统启动中...")
+    logger.info("🚀 Bilibili Wiki 知识库系统启动中...")
     ensure_directories()
     await init_db()
     logger.info("✅ 数据库初始化完成")
@@ -46,24 +46,25 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="Bilibili RAG 知识库系统",
+    title="Bilibili Wiki 知识库系统",
     description="""
 ## 项目简介
 
-将你的 B站收藏夹变成可对话的知识库！
+基于 Karpathy LLM Wiki 方案，将你的 B 站收藏夹变成可对话的持久化知识库！
 
 ### 功能特性
 
-- 🔐 **B站扫码登录** - 安全便捷
+- 🔐 **B 站扫码登录** - 安全便捷
 - 📁 **收藏夹管理** - 查看和选择收藏夹
 - 🤖 **AI 内容提取** - 自动获取视频摘要/字幕
-- 💬 **智能问答** - 基于收藏内容回答问题
-- 🔍 **语义搜索** - 快速找到相关视频
+- 📚 **Wiki 构建** - 增量构建结构化知识库
+- 💬 **智能问答** - 基于 Wiki 回答问题
 
 ### 技术栈
 
-- FastAPI + LangChain + ChromaDB
-- B站 API (非官方)
+- FastAPI + Qwen3.5 (本地 vLLM)
+- 基于 Karpathy LLM Wiki 方案
+- B 站 API (非官方)
     """,
     version="0.1.0",
     lifespan=lifespan
@@ -91,7 +92,7 @@ app.include_router(chat.router)
 async def root():
     """API 根路径"""
     return {
-        "message": "🎬 Bilibili RAG 知识库系统",
+        "message": "🎬 Bilibili Wiki 知识库系统",
         "version": "0.1.0",
         "docs": "/docs",
         "status": "running"

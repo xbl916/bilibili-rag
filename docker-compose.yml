@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Bilibili Wiki 后端服务
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bilibili-wiki-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./schema:/app/schema
+    env_file:
+      - .env
+    environment:
+      - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://localhost:8000/v1}
+      - LOCAL_ASR_BASE_URL=${LOCAL_ASR_BASE_URL:-http://localhost:1234/v1}
+      - LOCAL_VLM_BASE_URL=${LOCAL_VLM_BASE_URL:-http://localhost:3000/v1}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  models:
+    driver: local
