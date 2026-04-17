@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import asyncio
 import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -16,6 +17,8 @@ from loguru import logger
 from app.models import VideoContent, ContentSource
 from app.services.bilibili import BilibiliService
 from app.services.asr import ASRService
+from app.services.vision import VisionService
+from app.config import settings
 
 
 class ContentFetcher:
@@ -24,12 +27,19 @@ class ContentFetcher:
     
     采用二级降级策略：
     1. 音频转写（ASR）
-    2. 视频基本信息 (兜底)
+    2. 视觉分析（如果启用）
+    3. 视频基本信息 (兜底)
     """
     
-    def __init__(self, bilibili_service: BilibiliService, asr_service: ASRService):
+    def __init__(
+        self, 
+        bilibili_service: BilibiliService, 
+        asr_service: ASRService,
+        vision_service: Optional[VisionService] = None,
+    ):
         self.bili = bilibili_service
         self.asr = asr_service
+        self.vision = vision_service
     
     async def fetch_content(self, bvid: str, cid: int = None, title: str = None) -> VideoContent:
         """
@@ -67,13 +77,54 @@ class ContentFetcher:
         logger.info(f"[{bvid}] 已跳过 AI 摘要，优先使用 ASR")
 
         asr_text = await self._try_asr(bvid, cid)
+        
+        # 如果启用了视觉分析，获取视觉分析结果
+        vision_result = None
+        if self.vision and settings.vision_enabled and asr_text:
+            try:
+                video_url = await self._get_video_url(bvid, cid)
+                if video_url:
+                    logger.info(f"[{bvid}] 开始视觉分析...")
+                    
+                    # 策略1：整体分析
+                    max_duration = getattr(settings, "max_video_duration", 600)
+                    vision_result = {
+                        "global": await self.vision.analyze_video_global(
+                            video_url=video_url,
+                            title=title or bvid,
+                            duration_limit=max_duration,
+                        )
+                    }
+                    
+                    # 策略2：关键帧分析
+                    timestamps = await self._parse_asr_to_timestamps(asr_text)
+                    if timestamps:
+                        max_frames = getattr(settings, "max_frames_per_video", 20)
+                        vision_result["keyframes"] = await self.vision.analyze_video_keyframes(
+                            video_url=video_url,
+                            timestamps=timestamps[:max_frames],
+                            title=title or bvid,
+                        )
+                    
+                    logger.info(f"[{bvid}] 视觉分析完成")
+            except Exception as e:
+                logger.warning(f"[{bvid}] 视觉分析失败: {e}")
+        
         if asr_text:
-            logger.info(f"[{bvid}] 使用 ASR 文本")
+            logger.info(f"[{bvid}] 使用 ASR 文本" + (f" + 视觉分析" if vision_result else ""))
+            
+            # 如果有视觉分析结果，合并到内容中
+            final_content = asr_text
+            if vision_result:
+                # 视觉分析结果会传递给Wiki构建器用于生成更丰富的知识
+                pass
+            
             return VideoContent(
                 bvid=bvid,
                 title=title,
                 content=asr_text,
-                source=ContentSource.ASR
+                source=ContentSource.ASR,
+                vision_analysis=vision_result,
             )
         
         # ASR 失败时，补齐基础信息（避免遗漏简介）

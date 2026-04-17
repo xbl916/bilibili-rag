@@ -16,6 +16,7 @@ from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession
 from app.services.bilibili import BilibiliService
 from app.services.content_fetcher import ContentFetcher
 from app.services.asr import ASRService
+from app.services.vision import VisionService
 from app.services.wiki_builder import WikiBuilder, VideoSource
 from app.routers.auth import get_session
 from app.config import settings
@@ -451,7 +452,8 @@ async def sync_folders(
         dedeuserid=cookies.get("DedeUserID"),
     )
     asr_service = ASRService()
-    content_fetcher = ContentFetcher(bili, asr_service)
+    vision_service = VisionService() if settings.vision_enabled else None
+    content_fetcher = ContentFetcher(bili, asr_service, vision_service)
 
     try:
         folder_ids = request.folder_ids or []
@@ -547,7 +549,8 @@ async def _build_wiki_task(
             dedeuserid=cookies.get("DedeUserID"),
         )
         asr_service = ASRService()
-        content_fetcher = ContentFetcher(bili, asr_service)
+        vision_service = VisionService() if settings.vision_enabled else None
+        content_fetcher = ContentFetcher(bili, asr_service, vision_service)
         wiki_builder = WikiBuilder()
 
         try:
@@ -614,7 +617,7 @@ async def _build_wiki_task(
                             bvid=bvid,
                             title=title,
                             asr_text=content.content or "",
-                            vision_analysis=None,
+                            vision_analysis=content.vision_analysis,
                             meta={
                                 "up_owner": media.get("upper", {}).get("name", "未知 UP 主"),
                                 "duration": media.get("duration"),

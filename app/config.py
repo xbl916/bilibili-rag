@@ -76,9 +76,38 @@ class Settings(BaseSettings):
     
     # ==================== 视觉分析配置 ====================
     vision_enabled: bool = Field(default=False, env="VISION_ENABLED")
-    vision_model: str = Field(default="qwen2.5-vl-72b-instruct", env="VISION_MODEL")
-    frame_interval: int = Field(default=10, env="FRAME_INTERVAL")
-    frame_strategy: str = Field(default="keyframe", env="FRAME_STRATEGY")
+    vision_base_url: str = Field(
+        default="http://localhost:3000/v1",
+        env="VISION_BASE_URL"
+    )
+    vision_api_key: str = Field(
+        default="",
+        env="VISION_API_KEY"
+    )
+    vision_model: str = Field(
+        default="qwen3.5-vl",
+        env="VISION_MODEL"
+    )
+    vision_timeout: int = Field(
+        default=300,
+        env="VISION_TIMEOUT"
+    )
+    frame_interval: int = Field(
+        default=10,
+        env="FRAME_INTERVAL"
+    )
+    frame_strategy: str = Field(
+        default="keyframe",
+        env="FRAME_STRATEGY"
+    )
+    max_video_duration: int = Field(
+        default=600,
+        env="MAX_VIDEO_DURATION"
+    )
+    max_frames_per_video: int = Field(
+        default=20,
+        env="MAX_FRAMES_PER_VIDEO"
+    )
     
     class Config:
         env_file = ".env"

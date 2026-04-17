@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from loguru import logger
 import httpx
 
@@ -20,8 +20,8 @@ class VideoSource:
     bvid: str
     title: str
     asr_text: str
-    vision_analysis: Optional[dict]
-    meta: dict
+    vision_analysis: Optional[Dict[str, Any]] = None  # 视觉分析结果
+    meta: Optional[Dict[str, Any]] = None  # 元信息
 
 
 @dataclass
@@ -131,10 +131,11 @@ class WikiBuilder:
 """
     }
     
-    def __init__(self, wiki_dir: str = None, llm_base_url: str = None, llm_model: str = None):
+    def __init__(self, wiki_dir: str = None, llm_base_url: str = None, llm_model: str = None, vision_service: Optional[Any] = None):
         self.wiki_dir = wiki_dir or settings.wiki_dir
         self.llm_base_url = llm_base_url or settings.local_llm_base_url
         self.llm_model = llm_model or settings.local_llm_model
+        self.vision_service = vision_service
         
         # 确保目录存在
         self._ensure_directories()

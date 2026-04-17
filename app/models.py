@@ -133,6 +133,7 @@ class VideoContent(BaseModel):
     content: str
     source: ContentSource
     outline: Optional[list] = None
+    vision_analysis: Optional[dict] = None  # 视觉分析结果
 
 
 class QRCodeResponse(BaseModel):
