@@ -20,8 +20,8 @@ class VideoSource:
     bvid: str
     title: str
     asr_text: str
-    vision_analysis: Optional[Dict[str, Any]] = None  # 视觉分析结果
-    meta: Optional[Dict[str, Any]] = None  # 元信息
+    vision_analysis: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -132,11 +132,20 @@ class WikiBuilder:
     }
     
     def __init__(self, wiki_dir: str = None, llm_base_url: str = None, llm_model: str = None, vision_service: Optional[Any] = None):
+        """
+        初始化 WikiBuilder
+        
+        Args:
+            wiki_dir: Wiki 存储目录
+            llm_base_url: LLM 服务地址（默认使用配置的 LLM_BASE_URL）
+            llm_model: LLM 模型名称（默认使用配置的 LLM_MODEL）
+            vision_service: 视觉分析服务实例
+        """
         self.wiki_dir = wiki_dir or settings.wiki_dir
-        self.llm_base_url = llm_base_url or settings.local_llm_base_url
-        self.llm_model = llm_model or settings.local_llm_model
+        self.llm_base_url = llm_base_url or settings.llm_base_url
+        self.llm_model = llm_model or settings.llm_model_name
         self.vision_service = vision_service
-        self.llm_api_key = settings.local_llm_api_key or settings.openai_api_key
+        self.llm_api_key = settings.llm_api_key or settings.openai_api_key
         
         # 确保目录存在
         self._ensure_directories()

@@ -29,13 +29,11 @@ class VisionService:
         model: Optional[str] = None,
         timeout: int = 300,
     ):
-        self.base_url = base_url or getattr(settings, "vision_base_url", 
-                    getattr(settings, "local_vlm_base_url", "http://localhost:3000/v1"))
-        self.api_key = api_key or getattr(settings, "vision_api_key", 
-                    getattr(settings, "local_vlm_api_key", ""))
-        self.model = model or getattr(settings, "vision_model", 
-                    getattr(settings, "local_vlm_model", "qwen3.5-vl"))
-        self.timeout = timeout or getattr(settings, "vision_timeout", 300)
+        # 使用统一的 LLM_BASE_URL 作为默认地址
+        self.base_url = base_url or settings.llm_base_url
+        self.api_key = api_key or settings.llm_api_key
+        self.model = model or settings.vision_model
+        self.timeout = timeout or settings.vision_timeout
         self.temp_dir = os.path.join("data", "vision_tmp")
         os.makedirs(self.temp_dir, exist_ok=True)
 
