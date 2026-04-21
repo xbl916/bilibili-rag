@@ -53,17 +53,21 @@ class ContentFetcher:
         Returns:
             VideoContent 对象
         """
-        # 获取视频基本信息
+        # 始终获取最新的视频信息，确保 CID 正确
+        # 这是修复 CID 不匹配问题的关键：无论是否传入 CID，都从 get_video_info 获取正确的值
         video_info = None
-        if not cid or not title:
-            try:
-                video_info = await self.bili.get_video_info(bvid)
-                if not cid:
-                    cid = video_info.get("cid")
-                if not title:
-                    title = video_info.get("title", "未知标题")
-            except Exception as e:
-                logger.error(f"获取视频信息失败 [{bvid}]: {e}")
+        try:
+            video_info = await self.bili.get_video_info(bvid)
+            # 始终使用 video_info 中的 CID，而不是传入的 CID
+            actual_cid = video_info.get("cid")
+            if cid and actual_cid and cid != actual_cid:
+                logger.warning(f"[{bvid}] CID 不匹配！传入的 cid={cid} 与视频实际的 cid={actual_cid} 不同，使用实际值")
+            cid = actual_cid
+            title = title or video_info.get("title", "未知标题")
+        except Exception as e:
+            logger.error(f"获取视频信息失败 [{bvid}]: {e}")
+            # 获取失败时，如果传入了 CID 和标题，继续使用传入的值（降级处理）
+            if not cid or not title:
                 return VideoContent(
                     bvid=bvid,
                     title=title or "未知标题",
@@ -503,7 +507,7 @@ class ContentFetcher:
                 selected_subtitle = pick_subtitle(subtitles)
                 subtitle_url = extract_url(selected_subtitle or {})
                 if subtitle_url:
-                    subtitle_text = await self.bili.download_subtitle(subtitle_url)
+                    subtitle_text = await self.bili.download_subtitle(subtitle_url, cookies=cookies)
                     if subtitle_text and len(subtitle_text) >= 50:
                         preview = subtitle_text[:120].replace("\n", " ").strip()
                         logger.info(f"[{bvid}] 字幕获取成功，长度={len(subtitle_text)}，预览：{preview}")
@@ -532,7 +536,7 @@ class ContentFetcher:
                         selected_subtitle = pick_subtitle(subtitles)
                         subtitle_url = extract_url(selected_subtitle or {})
                         if subtitle_url:
-                            subtitle_text = await self.bili.download_subtitle(subtitle_url)
+                            subtitle_text = await self.bili.download_subtitle(subtitle_url, cookies=cookies)
                             if subtitle_text and len(subtitle_text) >= 50:
                                 preview = subtitle_text[:120].replace("\n", " ").strip()
                                 logger.info(f"[{bvid}] 字幕获取成功(补aid)，长度={len(subtitle_text)}，预览：{preview}")
@@ -549,7 +553,7 @@ class ContentFetcher:
                 selected_subtitle = pick_subtitle(view_subtitles)
                 subtitle_url = extract_url(selected_subtitle or {})
                 if subtitle_url:
-                    subtitle_text = await self.bili.download_subtitle(subtitle_url)
+                    subtitle_text = await self.bili.download_subtitle(subtitle_url, cookies=cookies)
                     if subtitle_text and len(subtitle_text) >= 50:
                         preview = subtitle_text[:120].replace("\n", " ").strip()
                         logger.info(f"[{bvid}] 字幕获取成功(view兜底)，长度={len(subtitle_text)}，预览：{preview}")

@@ -201,7 +201,8 @@ async def get_all_favorite_videos(
                 "cover": media.get("cover"),
                 "duration": media.get("duration"),
                 "owner": media.get("upper", {}).get("name"),
-                "cid": media.get("ugc", {}).get("first_cid") if media.get("ugc") else None
+                # 注意：不在这里返回 CID，因为收藏夹 API 只返回合集视频的 first_cid
+                # 普通单集视频没有这个字段。CID 将在 fetch_content 时通过 get_video_info 获取
             })
         
         return {

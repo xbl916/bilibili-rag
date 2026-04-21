@@ -397,21 +397,27 @@ class BilibiliService:
             video_info = await self.get_video_info(bvid)
             actual_aid = video_info.get("aid")
             actual_cid = video_info.get("cid")
-            logger.debug(f"[{bvid}] 获取到视频信息: aid={actual_aid}, cid={actual_cid}")
+            logger.info(f"[{bvid}] 获取到视频信息: aid={actual_aid}, cid={actual_cid}")
         except Exception as e:
-            logger.debug(f"[{bvid}] 获取视频信息失败: {e}")
+            logger.warning(f"[{bvid}] 获取视频信息失败: {e}")
             actual_aid = aid
             actual_cid = cid
+        
+        # 诊断日志：检查传入的 cid 和实际获取的 cid 是否一致
+        final_cid = actual_cid if actual_cid else cid
+        logger.info(f"[{bvid}] 播放器请求 - 传入 cid={cid}, 实际使用 cid={final_cid}")
+        if cid and actual_cid and cid != actual_cid:
+            logger.error(f"[{bvid}] ⚠️ CID 不匹配！传入 cid={cid} 与 video_info 中的 cid={actual_cid} 不同，使用 video_info 中的 cid={actual_cid}")
         
         # 使用正确的 aid 和 cid
         params = {
             "bvid": bvid,
-            "cid": actual_cid if actual_cid else cid,
+            "cid": final_cid,
         }
         if actual_aid:
             params["aid"] = actual_aid
 
-        logger.debug(f"[{bvid}] 播放器请求参数: {params}")
+        logger.info(f"[{bvid}] 播放器请求参数: {params}")
 
         # 尝试多种接口
         endpoints = [
@@ -563,12 +569,13 @@ class BilibiliService:
         logger.warning(f"[{bvid}] 所有参数组合均失败")
         return None
 
-    async def download_subtitle(self, subtitle_url: str) -> str:
+    async def download_subtitle(self, subtitle_url: str, cookies: dict = None) -> str:
         """
         下载字幕文件
         
         Args:
             subtitle_url: 字幕 URL
+            cookies: 登录 Cookie（可选，用于访问需要认证的字幕）
             
         Returns:
             字幕文本
@@ -577,8 +584,20 @@ class BilibiliService:
         if subtitle_url.startswith("//"):
             subtitle_url = "https:" + subtitle_url
         
-        response = await self.client.get(subtitle_url)
+        # 构建请求头（包含 Cookie）
+        headers = dict(self.HEADERS)
+        if cookies:
+            cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            headers["Cookie"] = cookie_header
+            logger.debug(f"下载字幕使用 Cookie: {cookie_header[:50]}...")
+        
+        response = await self.client.get(subtitle_url, headers=headers)
         data = response.json()
+        
+        # 检查是否有错误
+        if data.get("code") != 0:
+            logger.warning(f"字幕下载返回错误: code={data.get('code')}, message={data.get('message')}")
+            return ""
         
         # 拼接字幕文本
         texts = []
@@ -587,7 +606,9 @@ class BilibiliService:
             if content:
                 texts.append(content)
         
-        return "\n".join(texts)
+        result = "\n".join(texts)
+        logger.debug(f"字幕解析完成，共 {len(texts)} 条，总长度 {len(result)} 字符")
+        return result
 
     async def download_audio_to_file(self, audio_url: str, file_path: str, cookies: dict = None) -> bool:
         """

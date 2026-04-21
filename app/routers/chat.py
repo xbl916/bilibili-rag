@@ -192,7 +192,7 @@ def _route_with_llm(question: str) -> tuple[Optional[str], str]:
             "只输出一个词，不要解释。"
         )
         resp = client.chat.completions.create(
-            model=settings.llm_model,
+            model=settings.llm_model_name,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": question},
@@ -404,6 +404,26 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
         route = "direct"
     # 2) 无数据时处理
     if not has_data:
+        # 如果路由判断需要 Wiki 检索，优先尝试从 Wiki 搜索
+        if route == "vector":
+            try:
+                wiki_docs = wiki.search_by_keywords(question, bvids=None, k=5)
+            except Exception as e:
+                logger.warning(f"Wiki 检索失败: {e}")
+                wiki_docs = []
+            if wiki_docs:
+                context_parts, sources, seen_bvids = [], [], set()
+                for doc in wiki_docs:
+                    bvid, title, content = doc.bvid, doc.title, doc.content.strip()
+                    if content:
+                        preview = content[:2000] + "..." if len(content) > 2000 else content
+                        context_parts.append(f"【{title}】\n{preview}")
+                    if bvid and bvid not in seen_bvids:
+                        seen_bvids.add(bvid)
+                        sources.append({"bvid": bvid, "title": title, "url": f"https://www.bilibili.com/video/{bvid}"})
+                if context_parts:
+                    return _build_rag_messages("\n\n---\n\n".join(context_parts), question), sources, question
+        # Wiki 检索无果或不需要 Wiki，走兜底逻辑
         if is_collection_intent:
             context, sources = await _get_video_context(db, folder_ids, include_content=False, limit=50)
             if not context:
@@ -472,7 +492,7 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
     try:
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
-        response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
+        response = client.chat.completions.create(model=settings.llm_model_name, messages=messages, temperature=0.5)
         return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
     except HTTPException: raise
     except Exception as e:
@@ -488,8 +508,11 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
         def generate():
-            stream = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5, stream=True)
+            stream = client.chat.completions.create(model=settings.llm_model_name, messages=messages, temperature=0.5, stream=True)
             for chunk in stream:
+                # 跳过空 choices 的 chunk（某些模型可能返回）
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta
                 if delta and delta.content: yield delta.content
             yield f"\n[[SOURCES_JSON]]{json.dumps(sources, ensure_ascii=False)}"

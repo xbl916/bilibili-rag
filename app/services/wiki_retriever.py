@@ -77,7 +77,9 @@ class WikiRetriever:
     def search_by_keywords(self, query: str, bvids: Optional[List[str]] = None, k: int = 5) -> List[WikiDocument]:
         """通过关键词搜索 Wiki 文档"""
         query_terms = self._extract_query_terms(query)
+        logger.info(f"Wiki 检索: query='{query}', query_terms={query_terms}, bvids={bvids}, k={k}")
         if not query_terms:
+            logger.warning(f"Wiki 检索: 未提取到查询词")
             return []
         
         docs = []
@@ -148,12 +150,37 @@ class WikiRetriever:
                             )
                             scored_docs[filepath] = (doc, score)
         
+        # 搜索实体页面
+        entities_dir = os.path.join(self.wiki_dir, "entities")
+        if os.path.exists(entities_dir):
+            for filename in os.listdir(entities_dir):
+                if filename.endswith(".md"):
+                    filepath = os.path.join(entities_dir, filename)
+                    content = self._load_file(filepath)
+                    if content:
+                        title = self._extract_title(content)
+                        score = self._calculate_relevance(content, title, query_terms)
+                        if score > 0.2:  # 实体页面阈值较低
+                            doc = WikiDocument(
+                                bvid="",
+                                title=title,
+                                content=content,
+                                doc_type="entity",
+                                path=filepath,
+                                relevance_score=score
+                            )
+                            scored_docs[filepath] = (doc, score)
+        
         # 按相关性排序
         sorted_docs = sorted(scored_docs.items(), key=lambda x: x[1][1], reverse=True)
+        logger.info(f"Wiki 检索: 找到 {len(scored_docs)} 个相关文档，返回前 {k} 个")
+        for path, (doc, score) in sorted_docs:
+            logger.info(f"  - [{doc.doc_type}] {doc.title} (score={score:.2f}, path={path})")
         
         for _, (doc, score) in sorted_docs[:k]:
             docs.append(doc)
         
+        logger.info(f"Wiki 检索: 最终返回 {len(docs)} 个文档")
         return docs
     
     def search_all(self, query: str, k: int = 10) -> List[WikiDocument]:

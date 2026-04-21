@@ -627,9 +627,9 @@ class ASRService:
             return False
 
     async def _call_local_asr(self, file_path: str) -> Optional[str]:
-        """调用本地 OpenAI 格式 ASR 服务（自动将 MP3 转为 WAV）"""
+        """调用本地 OpenAI 格式 ASR 服务（自动将 MP3/m4s 转为 WAV）"""
         try:
-            # 如果输入是 MP3 文件，先转码为 WAV
+            # 如果输入是 MP3 或 m4s 文件，先转码为 WAV
             use_path = file_path
             mp3_temp_cleaned = False
             
@@ -641,6 +641,37 @@ class ASRService:
                     mp3_temp_cleaned = True  # 标记需要清理 MP3 原始文件
                 else:
                     logger.warning("MP3 转 WAV 失败，尝试直接使用原始文件")
+            
+            # 处理 .m4s 格式（B站视频音频片段）
+            elif file_path.endswith('.m4s'):
+                logger.info(f"检测到 m4s 文件，先转码为 MP3 再转为 WAV: {file_path}")
+                # 先转码为 MP3
+                mp3_path = os.path.splitext(file_path)[0] + ".mp3"
+                mp3_result = self._transcode_audio_to_mp3(file_path, mp3_path)
+                if mp3_result and os.path.exists(mp3_result):
+                    # 再将 MP3 转为 WAV
+                    wav_path = self._transcode_mp3_to_wav(mp3_result)
+                    if wav_path and os.path.exists(wav_path):
+                        use_path = wav_path
+                    else:
+                        logger.warning("MP3 转 WAV 失败，尝试直接使用 MP3")
+                        use_path = mp3_result
+                    # 清理临时 MP3 文件
+                    try:
+                        os.remove(mp3_result)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning("m4s 转 MP3 失败，尝试直接使用原始文件")
+            
+            # 处理其他非 WAV 格式
+            elif not file_path.endswith('.wav'):
+                logger.info(f"检测到 {os.path.splitext(file_path)[1]} 文件，尝试转码为 WAV: {file_path}")
+                wav_path = self._transcode_audio_to_wav(file_path)
+                if wav_path and os.path.exists(wav_path):
+                    use_path = wav_path
+                else:
+                    logger.warning("转码 WAV 失败，尝试直接使用原始文件")
             
             # 确保 base_url 包含协议
             base_url = self.base_url or settings.local_asr_base_url
@@ -699,6 +730,15 @@ class ASRService:
                     logger.debug(f"清理临时 WAV 文件: {use_path}")
                 except Exception:
                     pass
+            # 清理临时 MP3 文件（如果 m4s 转码流程中还有残留）
+            if file_path.endswith('.m4s'):
+                mp3_cleanup = os.path.splitext(file_path)[0] + ".mp3"
+                if os.path.exists(mp3_cleanup):
+                    try:
+                        os.remove(mp3_cleanup)
+                        logger.debug(f"清理临时 MP3 文件: {mp3_cleanup}")
+                    except Exception:
+                        pass
 
     def _transcribe_sync_with_model(self, audio_url: str, model: str) -> Optional[str]:
         """使用指定模型转写（用于本地文件上传）"""

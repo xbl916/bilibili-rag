@@ -220,17 +220,43 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
     if (building) return progress?.current_step || "处理中...";
     if (selected.size === 0) return "选择收藏夹";
 
-    // 检查选中的是否有未入库的
-    const hasUnindexed = Array.from(selected).some((id) => {
+    // 计算需要处理的视频总数
+    let totalPendingVideos = 0;
+    let hasUnindexed = false;  // 有完全未入库的收藏夹
+    
+    for (const id of selected) {
+      const status = statusMap[id];
       const folder = folders.find((f) => f.media_id === id);
-      if (!folder) return false;
-      return !statusMap[id]?.last_sync_at;
-    });
+      
+      // 从未同步过 = 未入库，显示所有视频数
+      if (!status?.last_sync_at) {
+        hasUnindexed = true;
+        const totalCount = folder?.media_count ?? 0;
+        totalPendingVideos += totalCount;
+        continue;
+      }
+      
+      // 计算总视频数
+      const countSource = folder?.count_source ?? "bili";
+      let totalCount = folder?.media_count ?? 0;
+      if (countSource !== "filtered" && status?.media_count != null) {
+        totalCount = status.media_count;
+      }
+      
+      const indexedCount = status?.indexed_count ?? 0;
+      
+      // 未同步的视频数 = 总数 - 已同步数
+      const pending = Math.max(0, totalCount - indexedCount);
+      totalPendingVideos += pending;
+    }
 
     if (hasUnindexed) {
-      return `入库 (${selected.size})`;
+      return `入库 (${totalPendingVideos})`;
     }
-    return `更新 (${selected.size})`;
+    if (totalPendingVideos === 0) {
+      return `已同步`;
+    }
+    return `更新 (${totalPendingVideos})`;
   };
 
   return (

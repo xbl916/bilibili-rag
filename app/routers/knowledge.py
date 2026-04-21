@@ -570,13 +570,46 @@ async def _build_wiki_task(
                 for idx, folder_id in enumerate(folder_ids, start=1):
                     build_tasks[task_id]["current_step"] = f"处理收藏夹 {folder_id}"
 
-                    # 获取收藏夹视频
-                    videos = await bili.get_all_favorite_videos(folder_id)
-                    total_videos += len(videos)
+                    # 首先同步收藏夹到数据库（确保 favorite_videos 表有记录）
+                    # _sync_folder 会返回同步结果，包括 folder_id（数据库内部 ID）
+                    sync_result = await _sync_folder(
+                        db,
+                        bili,
+                        content_fetcher,
+                        session_id,
+                        folder_id,
+                    )
+                    logger.info(f"收藏夹 {folder_id} 同步结果: {sync_result.get('message')}, 新增={sync_result.get('added')}, 视频数={sync_result.get('total')}")
 
-                    for media in videos:
-                        bvid = media.get("bvid") or media.get("bv_id")
-                        if not bvid or bvid in exclude_bvids:
+                    # 获取该收藏夹在数据库中的内部 ID
+                    folder_result = await db.execute(
+                        select(FavoriteFolder.id).where(
+                            FavoriteFolder.media_id == folder_id
+                        )
+                    )
+                    db_folder_id = folder_result.scalar()
+                    if not db_folder_id:
+                        logger.warning(f"收藏夹 {folder_id} 在数据库中没有记录，跳过")
+                        continue
+
+                    # 获取该收藏夹下的所有视频 BV 号（使用数据库内部 ID）
+                    result = await db.execute(
+                        select(FavoriteVideo.bvid).where(FavoriteVideo.folder_id == db_folder_id)
+                    )
+                    bvids_in_folder = [row[0] for row in result.fetchall()]
+                    total_videos += len(bvids_in_folder)
+                    logger.info(f"收藏夹 {folder_id} 共有 {len(bvids_in_folder)} 个视频")
+
+                    # 预先获取所有视频信息（用于获取标题等元数据）
+                    all_videos = await bili.get_all_favorite_videos(folder_id)
+                    video_meta_map = {}
+                    for media in all_videos:
+                        media_bvid = media.get("bvid") or media.get("bv_id")
+                        if media_bvid:
+                            video_meta_map[media_bvid] = media
+
+                    for bvid in bvids_in_folder:
+                        if bvid in exclude_bvids:
                             continue
                         
                         # 检查是否已处理
@@ -586,8 +619,11 @@ async def _build_wiki_task(
                         cache = result.scalar_one_or_none()
                         
                         if cache and cache.is_processed:
+                            logger.debug(f"[{bvid}] 已处理，跳过")
                             continue
                         
+                        # 从预获取的元数据中获取标题
+                        media = video_meta_map.get(bvid, {})
                         title = media.get("title", bvid)
                         
                         build_tasks[task_id]["current_step"] = f"处理视频：{title}"
@@ -621,13 +657,14 @@ async def _build_wiki_task(
                             db.add(new_cache)
 
                         # 构建视频源数据
+                        owner = media.get("upper", {})
                         video_source = VideoSource(
                             bvid=bvid,
                             title=title,
                             asr_text=content.content or "",
                             vision_analysis=content.vision_analysis,
                             meta={
-                                "up_owner": media.get("upper", {}).get("name", "未知 UP 主"),
+                                "up_owner": owner.get("name", "未知 UP 主"),
                                 "duration": media.get("duration"),
                                 "cover": media.get("cover"),
                             }
@@ -640,6 +677,15 @@ async def _build_wiki_task(
                         
                         processed += 1
                         build_tasks[task_id]["progress"] = int((processed / total_videos) * 100) if total_videos > 0 else 0
+
+                    # 处理完该收藏夹所有视频后，更新 last_sync_at 标记为已入库
+                    folder = await _get_or_create_folder(
+                        db,
+                        session_id=session_id,
+                        media_id=folder_id,
+                    )
+                    folder.last_sync_at = datetime.utcnow()
+                    await db.commit()
 
             build_tasks[task_id]["status"] = "completed"
             build_tasks[task_id]["progress"] = 100
