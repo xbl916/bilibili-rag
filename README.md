@@ -158,14 +158,58 @@ LOCAL_VLM_MODEL=qwen2.5-vl-72b-instruct
 
 ---
 
+## 🐳 Docker 部署
+
+### 构建镜像
+
+```bash
+# 构建 Docker 镜像
+docker build -t bilibili-rag:latest .
+```
+
+### 上传镜像到仓库 (可选)
+
+```bash
+# 标记镜像
+docker tag bilibili-rag:latest your-registry/bilibili-rag:latest
+
+# 推送到仓库
+docker push your-registry/bilibili-rag:latest
+```
+
+### 使用 Docker Compose 启动
+
+```bash
+# 确保 .env 文件已配置
+cp .env.example .env
+# 编辑 .env，填写配置
+
+# 启动服务
+docker-compose up -d
+
+# 访问应用
+# 前端: http://localhost
+# 后端 API: http://localhost/api/...
+# API 文档: http://localhost/api/docs
+```
+
+### 停止服务
+
+```bash
+docker-compose down
+```
+
+---
+
 ## 🧩 技术栈
 
 - **后端**：FastAPI
 - **LLM**：Qwen3.5-35B-A3B (本地 vLLM)
 - **ASR**：Whisper (本地，兼容 OpenAI 格式)
 - **VLM**：Qwen2.5-VL (可选，本地)
-- **前端**：Next.js + Tailwind
+- **前端**：Next.js + Tailwind (静态导出)
 - **数据库**：SQLite
+- **容器化**：Docker 多阶段构建 + Nginx 反向代理
 - **方案**：基于 Karpathy LLM Wiki
 
 ---

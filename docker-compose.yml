@@ -2,12 +2,10 @@ version: '3.8'
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: bilibili-rag:latest
     container_name: bilibili-wiki-app
     ports:
-      - "8000:8000"
+      - "80:80"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -16,7 +14,7 @@ services:
       - .env
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
       interval: 30s
       timeout: 10s
       retries: 3

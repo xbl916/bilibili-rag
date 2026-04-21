@@ -1,8 +1,11 @@
 /**
  * API 客户端
+ * 
+ * 开发环境: 通过 NEXT_PUBLIC_API_URL 环境变量配置，默认 http://localhost:8000
+ * Docker 环境: 通过 nginx 代理，使用 /api 相对路径
  */
 
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 // 通用请求函数
 async function request<T>(

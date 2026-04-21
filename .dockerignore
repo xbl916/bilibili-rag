@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+README.WIKI.md
+LICENSE
+
+# 测试
+test/
+assets/
+
+# 开发相关
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.yml
+Dockerfile
+nginx.conf
+start.sh
+.dockerignore
+
+# Node.js (前端构建会在 Docker 内部完成)
+frontend/node_modules
+frontend/.next
+frontend/out
+frontend/package-lock.json
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+venv/
+.env/
+*.egg
+
+# 日志和数据
+logs/
+data/
