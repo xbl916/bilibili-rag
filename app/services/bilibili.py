@@ -389,37 +389,68 @@ class BilibiliService:
         Returns:
             播放器信息
         """
+        cookies = self._get_cookies()
+        
+        # 先获取正确的视频信息
+        video_info = None
+        try:
+            video_info = await self.get_video_info(bvid)
+            actual_aid = video_info.get("aid")
+            actual_cid = video_info.get("cid")
+            logger.debug(f"[{bvid}] 获取到视频信息: aid={actual_aid}, cid={actual_cid}")
+        except Exception as e:
+            logger.debug(f"[{bvid}] 获取视频信息失败: {e}")
+            actual_aid = aid
+            actual_cid = cid
+        
+        # 使用正确的 aid 和 cid
         params = {
             "bvid": bvid,
-            "cid": cid,
+            "cid": actual_cid if actual_cid else cid,
         }
-        if aid:
-            params["aid"] = aid
+        if actual_aid:
+            params["aid"] = actual_aid
 
-        # 优先使用 WBI 版本，提高字幕获取成功率
-        try:
-            cookies = self._get_cookies()
-            cookies_for_sign = cookies if cookies else None
-            signed_params = await wbi_signer.sign(params, cookies=cookies_for_sign)
-            wbi_url = f"{self.BASE_URL}/x/player/wbi/v2"
-            response = await self.client.get(wbi_url, params=signed_params, cookies=cookies)
-            data = response.json()
-            if data.get("code") == 0:
-                return data.get("data")
-            logger.warning(f"WBI 播放器信息失败 [{bvid}]: {data.get('message', 'unknown error')}")
-        except Exception as e:
-            logger.warning(f"WBI 播放器信息异常 [{bvid}]: {e}")
+        logger.debug(f"[{bvid}] 播放器请求参数: {params}")
 
-        # 回退到普通接口
-        url = f"{self.BASE_URL}/x/player/v2"
-        response = await self.client.get(url, params=params, cookies=self._get_cookies())
-        data = response.json()
-
-        if data["code"] != 0:
-            logger.warning(f"获取播放器信息失败 [{bvid}]: {data.get('message', 'unknown error')}")
-            return None
-
-        return data["data"]
+        # 尝试多种接口
+        endpoints = [
+            (f"{self.BASE_URL}/x/player/wbi/v2", True),
+            (f"{self.BASE_URL}/x/player/v2", False),
+        ]
+        
+        for url, use_wbi in endpoints:
+            try:
+                if use_wbi:
+                    signed_params = await wbi_signer.sign(params, cookies=cookies)
+                    response = await self.client.get(url, params=signed_params, cookies=cookies)
+                else:
+                    response = await self.client.get(url, params=params, cookies=cookies)
+                
+                data = response.json()
+                logger.debug(f"[{bvid}] {url} code={data.get('code')}, message={data.get('message')}")
+                
+                if data.get("code") == 0:
+                    playdata = data.get("data")
+                    if playdata:
+                        # 打印字幕信息用于调试
+                        subtitle_info = playdata.get("subtitle", {}) or {}
+                        subtitles = subtitle_info.get("subtitles") or subtitle_info.get("list") or []
+                        logger.info(f"[{bvid}] 获取到 {len(subtitles)} 条字幕")
+                        for sub in subtitles:
+                            lan = sub.get("lan", "")
+                            lan_doc = sub.get("lan_doc", "")
+                            subtitle_url = sub.get("subtitle_url") or sub.get("url", "")
+                            logger.info(f"[{bvid}] 字幕: lan={lan}, lan_doc={lan_doc}, url={subtitle_url[:150] if subtitle_url else None}...")
+                        return playdata
+                    logger.debug(f"[{url}] 返回数据中没有 data")
+                else:
+                    logger.debug(f"[{url}] 返回错误: {data.get('message')}")
+            except Exception as e:
+                logger.debug(f"[{url}] 请求失败: {e}")
+        
+        logger.warning(f"[{bvid}] 所有播放器信息接口均失败")
+        return None
 
     async def get_audio_url(self, bvid: str, cid: int) -> Optional[str]:
         """
@@ -432,69 +463,104 @@ class BilibiliService:
         Returns:
             音频 URL（可能为空）
         """
-        params = {
-            "bvid": bvid,
-            "cid": cid,
-            "fnval": 16,
-            "fnver": 0,
-            "fourk": 1,
-        }
-
         cookies = self._get_cookies()
-        cookies_for_sign = cookies if cookies else None
-
-        # 优先使用 WBI 接口
+        
+        # 先获取视频信息以获取 aid
+        aid = None
         try:
-            signed_params = await wbi_signer.sign(params, cookies=cookies_for_sign)
-            url = f"{self.BASE_URL}/x/player/wbi/playurl"
-            response = await self.client.get(url, params=signed_params, cookies=cookies)
-            data = response.json()
+            video_info = await self.get_video_info(bvid)
+            aid = video_info.get("aid")
+            logger.debug(f"[{bvid}] 获取到 aid={aid}")
         except Exception as e:
-            logger.warning(f"获取音频信息失败(WBI) [{bvid}]: {e}")
-            data = None
-
-        # 回退到普通接口
-        if not data or data.get("code") != 0:
+            logger.debug(f"[{bvid}] 获取视频信息失败: {e}")
+        
+        # 构建 Cookie 请求头
+        cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        logger.info(f"[{bvid}] Cookie: {cookie_header[:100]}...")
+        
+        # 尝试多种参数组合（参考用户提供的成功请求）
+        param_sets = [
+            # 组合 1: 用户提供的参数
+            {"bvid": bvid, "cid": cid, "qn": 32, "fnval": 16},
+            # 组合 2: 加上 aid
+            {"aid": aid, "bvid": bvid, "cid": cid, "qn": 32, "fnval": 16},
+        ]
+        
+        for idx, params in enumerate(param_sets):
+            logger.info(f"[{bvid}] 尝试参数组合 {idx+1}: {list(params.keys())}")
+            
             try:
+                # 使用普通接口，手动添加 Cookie 头
                 url = f"{self.BASE_URL}/x/player/playurl"
-                response = await self.client.get(url, params=params, cookies=cookies)
-                data = response.json()
-            except Exception as e:
-                logger.warning(f"获取音频信息失败 [{bvid}]: {e}")
-                return None
+                
+                # 构建请求头（包含 Cookie）
+                request_headers = dict(self.HEADERS)
+                if cookie_header:
+                    request_headers["Cookie"] = cookie_header
+                    request_headers["Referer"] = "https://www.bilibili.com"
+                
+                logger.debug(f"[{bvid}] 请求 URL: {url}")
+                logger.debug(f"[{bvid}] 请求参数: {params}")
+                logger.debug(f"[{bvid}] 请求头: {request_headers}")
+                
+                response = await self.client.get(url, params=params, headers=request_headers)
+                logger.debug(f"[{bvid}] playurl status={response.status_code}, text_len={len(response.text)}")
+                logger.debug(f"[{bvid}] playurl response: {response.text}")
+                
+                if response.text and response.status_code == 200:
+                    try:
+                        data = response.json()
+                        logger.debug(f"[{bvid}] playurl code={data.get('code')}, message={data.get('message')}")
+                        
+                        if data.get("code") == 0:
+                            payload = data.get("data") or {}
+                            dash = payload.get("dash") or {}
+                            audio_list = dash.get("audio") or []
+                            
+                            logger.info(f"[{bvid}] 参数组合 {idx+1} 成功，audio 数量={len(audio_list)}")
+                            
+                            # 打印所有音频信息用于调试
+                            for i, item in enumerate(audio_list):
+                                bw = item.get("bandwidth") or item.get("bandWidth") or 0
+                                audio_url = item.get("baseUrl") or item.get("base_url") or item.get("url")
+                                logger.info(f"[{bvid}] audio[{i}]: bandwidth={bw}, url={audio_url[:100] if audio_url else None}...")
+                            
+                            if audio_list:
+                                def _bw(item) -> int:
+                                    value = item.get("bandwidth") or item.get("bandWidth") or 0
+                                    try:
+                                        return int(value)
+                                    except Exception:
+                                        return 0
 
-        if data.get("code") != 0:
-            logger.warning(f"获取音频信息失败 [{bvid}]: {data.get('message', 'unknown error')}")
-            return None
-
-        payload = data.get("data") or {}
-        dash = payload.get("dash") or {}
-        audio_list = dash.get("audio") or []
-        if audio_list:
-            def _bw(item) -> int:
-                value = item.get("bandwidth") or item.get("bandWidth") or 0
-                try:
-                    return int(value)
-                except Exception:
-                    return 0
-
-            # 优先选择 <= 96kbps 的最高档，兼顾速度与识别效果；否则选最低带宽兜底
-            max_bw = 64_000
-            candidates = [a for a in audio_list if _bw(a) > 0]
-            if candidates:
-                preferred = [a for a in candidates if _bw(a) <= max_bw]
-                if preferred:
-                    best = max(preferred, key=_bw)
+                                candidates = [a for a in audio_list if _bw(a) > 0]
+                                if candidates:
+                                    best = max(candidates, key=_bw)
+                                    audio_url = best.get("baseUrl") or best.get("base_url") or best.get("url")
+                                    logger.info(f"[{bvid}] 获取音频成功 (组合{idx+1}, bandwidth={_bw(best)})")
+                                    return audio_url
+                                elif audio_list:
+                                    audio_url = audio_list[0].get("baseUrl") or audio_list[0].get("base_url") or audio_list[0].get("url")
+                                    logger.info(f"[{bvid}] 获取音频成功 (组合{idx+1}, 默认)")
+                                    return audio_url
+                            
+                            # 尝试 durl
+                            durl = payload.get("durl") or []
+                            if durl:
+                                logger.info(f"[{bvid}] 获取音频成功 (组合{idx+1}, durl)")
+                                return durl[0].get("url")
+                        
+                        logger.warning(f"[{bvid}] 参数组合 {idx+1} 没有音频流")
+                    except Exception as e:
+                        logger.warning(f"[{bvid}] 解析响应失败: {e}, response={response.text}")
                 else:
-                    best = min(candidates, key=_bw)
-            else:
-                best = audio_list[0]
-            return best.get("baseUrl") or best.get("base_url") or best.get("url")
-
-        durl = payload.get("durl") or []
-        if durl:
-            return durl[0].get("url")
-
+                    logger.debug(f"[{bvid}] playurl 返回异常: status={response.status_code}, text={response.text[:200]}")
+                    
+            except Exception as e:
+                import traceback
+                logger.debug(f"[{bvid}] 参数组合 {idx+1} 异常: {e}\n{traceback.format_exc()}")
+        
+        logger.warning(f"[{bvid}] 所有参数组合均失败")
         return None
 
     async def download_subtitle(self, subtitle_url: str) -> str:
@@ -523,13 +589,14 @@ class BilibiliService:
         
         return "\n".join(texts)
 
-    async def download_audio_to_file(self, audio_url: str, file_path: str) -> bool:
+    async def download_audio_to_file(self, audio_url: str, file_path: str, cookies: dict = None) -> bool:
         """
-        下载音频流到本地文件（带 Cookie 与 Referer）
+        下载音频流到本地文件
         
         Args:
             audio_url: 音频 URL
             file_path: 本地保存路径
+            cookies: Cookie 字典（可选，默认使用实例的 Cookie）
             
         Returns:
             是否下载成功
@@ -538,11 +605,11 @@ class BilibiliService:
             return False
 
         headers = dict(self.HEADERS)
-        cookies = self._get_cookies()
+        use_cookies = cookies if cookies else self._get_cookies()
 
         try:
             async with self.client.stream(
-                "GET", audio_url, headers=headers, cookies=cookies
+                "GET", audio_url, headers=headers, cookies=use_cookies
             ) as resp:
                 if resp.status_code not in (200, 206):
                     logger.warning(

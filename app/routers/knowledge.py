@@ -589,9 +589,17 @@ async def _build_wiki_task(
                             continue
                         
                         title = media.get("title", bvid)
-                        cid = media.get("cid") or media.get("id")
                         
                         build_tasks[task_id]["current_step"] = f"处理视频：{title}"
+
+                        # 获取正确的视频信息（包括 cid）
+                        try:
+                            video_info = await bili.get_video_info(bvid)
+                            cid = video_info.get("cid")
+                            logger.debug(f"[{bvid}] 获取到正确的 cid={cid}")
+                        except Exception as e:
+                            logger.warning(f"[{bvid}] 获取视频信息失败: {e}")
+                            cid = None
 
                         # 获取视频内容
                         content = await content_fetcher.fetch_content(bvid, cid, title)

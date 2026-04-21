@@ -11,12 +11,11 @@ from loguru import logger
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from openai import OpenAI
-from langchain.schema import Document
 
 from app.database import get_db
 from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache
 from app.config import settings
-from app.routers.knowledge import get_rag_service
+from app.services.wiki_retriever import WikiRetriever
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
@@ -223,19 +222,18 @@ def _extract_keywords(question: str) -> List[str]:
             keywords.append(kw)
     return keywords
 
-def _filter_docs_by_keywords(docs: List[Document], question: str) -> List[Document]:
-    """根据关键词过滤召回内容，减少噪声"""
+def _filter_docs_by_keywords(docs, question: str):
+    """根据关键词过滤 Wiki 文档（基于 WikiDocument）"""
     keywords = _extract_keywords(question)
     if not keywords:
-        return []
-    filtered: List[Document] = []
+        return docs
+    filtered = []
     for doc in docs:
-        meta = doc.metadata or {}
-        title = meta.get("title", "") or ""
-        content = doc.page_content or ""
+        title = doc.title or ""
+        content = doc.content or ""
         if any(kw in title for kw in keywords) or any(kw in content for kw in keywords):
             filtered.append(doc)
-    return filtered
+    return filtered if filtered else docs
 
 async def _is_related_to_collection(db: AsyncSession, folder_ids: List[int], question: str) -> bool:
     """判断问题是否与收藏夹内容有关"""
@@ -380,7 +378,7 @@ async def _get_video_titles_context(db: AsyncSession, folder_ids: List[int], lim
 async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[list[dict], List[dict], str]:
     """准备 LLM 消息与来源信息"""
     question = request.question.strip()
-    rag = get_rag_service()
+    wiki = WikiRetriever()
     folder_ids = []
     if request.session_id:
         folder_ids = await _get_folder_ids_for_session(db, request.session_id, request.folder_ids)
@@ -444,19 +442,20 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
         related = await _is_related_to_collection(db, folder_ids, question)
     if not related and not is_collection_intent:
         return _build_direct_messages(question), [], question
-    # 7) 向量检索
-    docs = []
+    # 7) Wiki 检索（基于文件系统）
+    wiki_docs = []
     try:
-        docs = rag.search(question, k=5, bvids=bvids if bvids else None)
+        wiki_docs = wiki.search_by_keywords(question, bvids=bvids if bvids else None, k=5)
     except Exception as e:
-        logger.warning(f"向量检索失败: {e}")
-    if docs:
-        filtered_docs = _filter_docs_by_keywords(docs, question)
-        docs = filtered_docs if filtered_docs else docs
+        logger.warning(f"Wiki 检索失败: {e}")
+    if wiki_docs:
         context_parts, sources, seen_bvids = [], [], set()
-        for doc in docs:
-            bvid, title, content = doc.metadata.get("bvid", ""), doc.metadata.get("title", ""), doc.page_content.strip()
-            if content: context_parts.append(f"【{title}】\n{content}")
+        for doc in wiki_docs:
+            bvid, title, content = doc.bvid, doc.title, doc.content.strip()
+            if content:
+                # 截取内容避免过长（保留前2000字符）
+                preview = content[:2000] + "..." if len(content) > 2000 else content
+                context_parts.append(f"【{title}】\n{preview}")
             if bvid and bvid not in seen_bvids:
                 seen_bvids.add(bvid)
                 sources.append({"bvid": bvid, "title": title, "url": f"https://www.bilibili.com/video/{bvid}"})
@@ -502,22 +501,24 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
 
 @router.post("/search")
 async def search_videos(query: str, k: int = 5):
-    """搜索相关视频片段"""
+    """搜索相关视频片段（基于 Wiki 文件系统）"""
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="查询不能为空")
     try:
-        rag = get_rag_service()
-        docs = rag.search(query, k=k)
+        wiki = WikiRetriever()
+        wiki_docs = wiki.search_by_keywords(query, k=k)
         results, seen_bvids = [], set()
-        for doc in docs:
-            bvid = doc.metadata.get("bvid", "")
-            if bvid in seen_bvids: continue
+        for doc in wiki_docs:
+            bvid = doc.bvid
+            if bvid in seen_bvids:
+                continue
             seen_bvids.add(bvid)
+            content_preview = doc.content[:200] + "..." if len(doc.content) > 200 else doc.content
             results.append({
                 "bvid": bvid,
-                "title": doc.metadata.get("title", ""),
-                "url": doc.metadata.get("url", ""),
-                "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
+                "title": doc.title,
+                "url": f"https://www.bilibili.com/video/{bvid}",
+                "content_preview": content_preview
             })
         return {"results": results}
     except Exception as e:

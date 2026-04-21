@@ -12,6 +12,20 @@ import os
 class Settings(BaseSettings):
     """应用配置"""
     
+    # ==================== OpenAI API 配置（用于 LLM 和 Embeddings） ====================
+    openai_api_key: str = Field(
+        default="",
+        env="OPENAI_API_KEY"
+    )
+    openai_base_url: str = Field(
+        default="http://localhost:8000/v1",
+        env="OPENAI_BASE_URL"
+    )
+    llm_model: str = Field(
+        default="qwen3.5-35b-a3b",
+        env="LLM_MODEL"
+    )
+    
     # ==================== 本地 LLM 配置 ====================
     local_llm_base_url: str = Field(
         default="http://localhost:8000/v1",

@@ -136,12 +136,16 @@ class WikiBuilder:
         self.llm_base_url = llm_base_url or settings.local_llm_base_url
         self.llm_model = llm_model or settings.local_llm_model
         self.vision_service = vision_service
+        self.llm_api_key = settings.local_llm_api_key or settings.openai_api_key
         
         # 确保目录存在
         self._ensure_directories()
         
-        # 初始化 HTTP 客户端
-        self.http_client = httpx.AsyncClient(timeout=300.0)
+        # 初始化 HTTP 客户端（携带 API Key 头）
+        headers = {}
+        if self.llm_api_key:
+            headers["Authorization"] = f"Bearer {self.llm_api_key}"
+        self.http_client = httpx.AsyncClient(timeout=300.0, headers=headers)
         
         logger.info(f"WikiBuilder 初始化完成，wiki_dir={self.wiki_dir}")
     
@@ -252,8 +256,11 @@ class WikiBuilder:
         prompt = self._build_concept_extraction_prompt(source)
         
         try:
-            response = await self._call_llm(prompt)
-            concepts_data = json.loads(response)
+            response = await self._call_llm(prompt, force_json=True)
+            concepts_data = self._parse_json_response(response)
+            
+            if concepts_data is None:
+                raise json.JSONDecodeError("无法解析 JSON", "", 0)
             
             concepts = []
             for c in concepts_data:
@@ -270,19 +277,6 @@ class WikiBuilder:
             logger.info(f"从视频 {source.bvid} 提取了 {len(concepts)} 个概念")
             return concepts
             
-        except json.JSONDecodeError as e:
-            logger.warning(f"概念提取 JSON 解析失败：{e}, 尝试修复")
-            # 尝试从响应中提取 JSON
-            import re
-            match = re.search(r'\[.*\]', response, re.DOTALL)
-            if match:
-                try:
-                    concepts_data = json.loads(match.group())
-                    return await self._parse_concepts(concepts_data, source.bvid)
-                except:
-                    pass
-            raise
-        
         except Exception as e:
             logger.error(f"概念提取失败：{e}")
             # 返回默认概念
@@ -297,8 +291,9 @@ class WikiBuilder:
     
     async def _extract_entities(self, source: VideoSource) -> List[EntityPage]:
         """从视频内容中提取实体（工具、框架、人物等）"""
-        prompt = f"""
-请从以下视频内容中提取实体（工具、框架、技术、人物等）：
+        prompt = f"""请从以下视频内容中提取实体（工具、框架、技术、人物等）。
+
+【重要】只输出纯 JSON 数组，不要输出任何其他文字、解释或 markdown 代码块标记。
 
 【视频标题】
 {source.title}
@@ -327,8 +322,12 @@ class WikiBuilder:
 """
         
         try:
-            response = await self._call_llm(prompt)
-            entities_data = json.loads(response)
+            response = await self._call_llm(prompt, force_json=True)
+            entities_data = self._parse_json_response(response)
+            
+            if entities_data is None:
+                logger.warning("实体提取：无法解析 JSON 响应")
+                return []
             
             entities = []
             for e in entities_data:
@@ -561,25 +560,74 @@ class WikiBuilder:
         
         logger.info(f"记录日志：{operation} | {bvid}")
     
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, force_json: bool = False) -> str:
         """调用本地 LLM 服务"""
         try:
+            logger.debug(f"调用 LLM: {self.llm_base_url}/chat/completions, model={self.llm_model}")
+            
+            messages = []
+            if force_json:
+                messages.append({
+                    "role": "system",
+                    "content": "你必须只输出纯 JSON 格式的内容。不要输出任何其他文字、解释或 markdown 代码块标记（如 ```json 或 ```）。只输出 JSON 数组或对象。"
+                })
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+            
             response = await self.http_client.post(
                 f"{self.llm_base_url}/chat/completions",
                 json={
                     "model": self.llm_model,
-                    "messages": [{
-                        "role": "user",
-                        "content": prompt
-                    }],
+                    "messages": messages,
                     "temperature": 0.3
                 }
             )
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            logger.debug(f"LLM 响应内容长度: {len(content)}, 前100字符: {content[:100]}")
+            return content
+        except httpx.HTTPStatusError as e:
+            logger.error(f"LLM 调用失败 (HTTP {e.response.status_code}): {e.response.text}")
+            raise
         except Exception as e:
             logger.error(f"LLM 调用失败：{e}")
             raise
+    
+    def _parse_json_response(self, response: str):
+        """尝试从 LLM 响应中解析 JSON"""
+        import re
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试移除 markdown 代码块标记
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join(lines[1:-1]) if len(lines) > 2 else lines[1] if len(lines) > 1 else ""
+        
+        # 尝试从文本中提取 JSON 数组
+        match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试从文本中提取 JSON 对象
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        
+        logger.warning(f"无法从响应中解析 JSON: {response[:200]}")
+        return None
     
     async def _write_page(self, path: str, content: str):
         """写入页面文件"""
@@ -596,7 +644,9 @@ class WikiBuilder:
 {json.dumps(source.vision_analysis, ensure_ascii=False, indent=2)}
 """
         
-        return f"""请从以下视频内容中提取关键概念和知识点：
+        return f"""请从以下视频内容中提取关键概念和知识点。
+
+【重要】只输出纯 JSON 数组，不要输出任何其他文字、解释或 markdown 代码块标记。
 
 【视频标题】
 {source.title}
@@ -610,7 +660,7 @@ class WikiBuilder:
 3. 标注概念在视频中的出现位置（时间戳，秒）
 4. 识别概念之间的关系（交叉引用）
 5. 评估概念的重要性（high/medium/low）
-6. 输出为 JSON 格式：
+6. 输出为 JSON 格式，不要包含```json标记：
 [
   {{
     "name": "概念名",

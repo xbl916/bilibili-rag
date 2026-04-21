@@ -1,7 +1,7 @@
 """
 Bilibili RAG 知识库系统
 
-视频内容获取服务 - 二级降级策略
+视频内容获取服务 - 三级降级策略
 """
 from typing import Optional
 from urllib.parse import urlparse
@@ -25,10 +25,10 @@ class ContentFetcher:
     """
     视频内容获取器
     
-    采用二级降级策略：
-    1. 音频转写（ASR）
-    2. 视觉分析（如果启用）
-    3. 视频基本信息 (兜底)
+    采用三级降级策略：
+    1. 字幕获取（优先，质量最高、成本最低）
+    2. ASR 音频转写（字幕不可用时）
+    3. 视频基本信息（全部失败时兜底）
     """
     
     def __init__(
@@ -73,61 +73,42 @@ class ContentFetcher:
         
         description = video_info.get("desc", "") if video_info else ""
         
-        # Level 1: 跳过 AI 摘要，优先使用 ASR
-        logger.info(f"[{bvid}] 已跳过 AI 摘要，优先使用 ASR")
-
-        asr_text = await self._try_asr(bvid, cid)
+        # Level 1: 优先使用字幕（质量更高、成本更低）
+        logger.info(f"[{bvid}] 优先尝试字幕获取")
+        subtitle_text = await self._try_subtitle(bvid, cid, video_info)
+        content_text = None
+        
+        if subtitle_text and len(subtitle_text) >= 50:
+            content_text = subtitle_text
+            logger.info(f"[{bvid}] 使用字幕作为内容来源，长度={len(subtitle_text)}")
+        else:
+            # 字幕不可用时，尝试 ASR 音频转写
+            logger.info(f"[{bvid}] 字幕不可用，尝试 ASR 音频转写")
+            asr_text = await self._try_asr(bvid, cid)
+            if asr_text:
+                content_text = asr_text
+                logger.info(f"[{bvid}] 使用 ASR 文本作为内容来源，长度={len(asr_text)}")
         
         # 如果启用了视觉分析，获取视觉分析结果
         vision_result = None
-        if self.vision and settings.vision_enabled and asr_text:
-            try:
-                video_url = await self._get_video_url(bvid, cid)
-                if video_url:
-                    logger.info(f"[{bvid}] 开始视觉分析...")
-                    
-                    # 策略1：整体分析
-                    max_duration = getattr(settings, "max_video_duration", 600)
-                    vision_result = {
-                        "global": await self.vision.analyze_video_global(
-                            video_url=video_url,
-                            title=title or bvid,
-                            duration_limit=max_duration,
-                        )
-                    }
-                    
-                    # 策略2：关键帧分析
-                    timestamps = await self._parse_asr_to_timestamps(asr_text)
-                    if timestamps:
-                        max_frames = getattr(settings, "max_frames_per_video", 20)
-                        vision_result["keyframes"] = await self.vision.analyze_video_keyframes(
-                            video_url=video_url,
-                            timestamps=timestamps[:max_frames],
-                            title=title or bvid,
-                        )
-                    
-                    logger.info(f"[{bvid}] 视觉分析完成")
-            except Exception as e:
-                logger.warning(f"[{bvid}] 视觉分析失败: {e}")
+        if self.vision and settings.vision_enabled and content_text:
+            logger.warning(f"[{bvid}] 视觉分析功能待实现，跳过")
+            vision_result = None
         
-        if asr_text:
-            logger.info(f"[{bvid}] 使用 ASR 文本" + (f" + 视觉分析" if vision_result else ""))
-            
-            # 如果有视觉分析结果，合并到内容中
-            final_content = asr_text
-            if vision_result:
-                # 视觉分析结果会传递给Wiki构建器用于生成更丰富的知识
-                pass
+        # 返回成功获取的内容（字幕或 ASR）
+        if content_text:
+            source_type = ContentSource.SUBTITLE if subtitle_text else ContentSource.ASR
+            logger.info(f"[{bvid}] 成功获取内容，来源={'字幕' if subtitle_text else 'ASR'}")
             
             return VideoContent(
                 bvid=bvid,
                 title=title,
-                content=asr_text,
-                source=ContentSource.ASR,
+                content=content_text,
+                source=source_type,
                 vision_analysis=vision_result,
             )
         
-        # ASR 失败时，补齐基础信息（避免遗漏简介）
+        # 全部失败时，补齐基础信息（避免遗漏简介）
         if not video_info:
             try:
                 video_info = await self.bili.get_video_info(bvid)
@@ -147,23 +128,31 @@ class ContentFetcher:
             bvid=bvid,
             title=title,
             content=basic_content,
-            source=ContentSource.BASIC_INFO
+            source=ContentSource.BASIC_INFO,
         )
 
     async def _try_asr(self, bvid: str, cid: int) -> Optional[str]:
         """尝试进行音频转写"""
         try:
+            cookies = self.bili._get_cookies()
             audio_url = await self.bili.get_audio_url(bvid, cid)
             if not audio_url:
                 logger.info(f"[{bvid}] 未获取到音频 URL")
                 return None
-            status = await self._probe_audio_url(bvid, audio_url)
-            if status is not None and status < 400:
-                logger.info(f"[{bvid}] 音频 URL 可达，使用 Transcription")
-                text = await self.asr.transcribe_url(audio_url)
+            
+            # B 站音频 URL 需要 Cookie，直接走 transcribe_url（内部会先下载再处理）
+            if "bilivideo.com" in audio_url or "bilibili.com" in audio_url:
+                logger.info(f"[{bvid}] 检测到 B 站音频 URL，直接走下载+转写流程")
+                text = await self.asr.transcribe_url(audio_url, cookies=cookies)
             else:
-                logger.info(f"[{bvid}] 音频 URL 不可达，使用 Recognition 兜底")
-                text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
+                # 其他 URL 先探测可达性
+                status = await self._probe_audio_url(bvid, audio_url, cookies=cookies)
+                if status is not None and status < 400:
+                    logger.info(f"[{bvid}] 音频 URL 可达，使用 Transcription")
+                    text = await self.asr.transcribe_url(audio_url, cookies=cookies)
+                else:
+                    logger.info(f"[{bvid}] 音频 URL 不可达，使用 Recognition 兜底")
+                    text = await self._try_asr_with_local_audio(bvid, cid, audio_url, cookies=cookies)
 
             if not text or len(text) < 50:
                 logger.info(f"[{bvid}] ASR 内容过少")
@@ -175,8 +164,8 @@ class ContentFetcher:
             logger.warning(f"[{bvid}] ASR 失败: {e}")
             return None
 
-    async def _probe_audio_url(self, bvid: str, audio_url: str) -> Optional[int]:
-        """探测音频 URL 可达性（不带 Cookie，模拟 ASR 服务拉取）"""
+    async def _probe_audio_url(self, bvid: str, audio_url: str, cookies: dict = None) -> Optional[int]:
+        """探测音频 URL 可达性"""
         try:
             parsed = urlparse(audio_url)
             safe_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
@@ -187,7 +176,7 @@ class ContentFetcher:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             status = None
             try:
-                head = await client.head(audio_url)
+                head = await client.head(audio_url, cookies=cookies)
                 status = head.status_code
             except Exception as e:
                 logger.info(f"[{bvid}] 音频 URL HEAD 失败: {e}")
@@ -195,7 +184,7 @@ class ContentFetcher:
             if status is None or status >= 400:
                 try:
                     headers = {"Range": "bytes=0-0"}
-                    get = await client.get(audio_url, headers=headers)
+                    get = await client.get(audio_url, headers=headers, cookies=cookies)
                     status = get.status_code
                 except Exception as e:
                     logger.info(f"[{bvid}] 音频 URL GET 失败: {e}")
@@ -207,9 +196,9 @@ class ContentFetcher:
         return status
 
     async def _try_asr_with_local_audio(
-        self, bvid: str, cid: int, audio_url: str
+        self, bvid: str, cid: int, audio_url: str, cookies: dict = None
     ) -> Optional[str]:
-        """本地下载后使用 Recognition 直传"""
+        """本地下载后转码为 MP3，再使用 Recognition 直传"""
         tmp_dir = os.path.join("data", "asr_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
@@ -222,7 +211,7 @@ class ContentFetcher:
         filename = f"{bvid}_{cid}_{int(time.time())}{ext}"
         file_path = os.path.join(tmp_dir, filename)
 
-        ok = await self.bili.download_audio_to_file(audio_url, file_path)
+        ok = await self.bili.download_audio_to_file(audio_url, file_path, cookies=cookies)
         if not ok:
             logger.info(f"[{bvid}] 本地下载音频失败")
             return None
@@ -235,11 +224,73 @@ class ContentFetcher:
                 logger.debug(f"[{bvid}] 清理过小音频失败: {file_path}")
             return None
 
-        text = await self.asr.transcribe_local_file(file_path)
+        # 转码为 MP3
+        mp3_path = os.path.splitext(file_path)[0] + ".mp3"
+        converted_path = self._transcode_to_mp3(bvid, file_path, mp3_path)
+        
+        # 清理原始文件
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+        
+        if converted_path and os.path.exists(converted_path):
+            use_path = converted_path
+            logger.info(f"[{bvid}] 使用转码后的 MP3 文件: {use_path}")
+        else:
+            use_path = file_path
+            logger.warning(f"[{bvid}] MP3 转码失败，使用原始文件")
+
+        text = await self.asr.transcribe_local_file(use_path)
         if text:
             preview = text[:120].replace("\n", " ").strip()
             logger.info(f"[{bvid}] Recognition ASR 成功，长度={len(text)}，预览：{preview}")
+        
+        # 清理转码后的 MP3 文件
+        if converted_path and os.path.exists(converted_path):
+            try:
+                os.remove(converted_path)
+            except Exception:
+                pass
+        
         return text
+
+    def _transcode_to_mp3(self, bvid: str, input_path: str, output_path: str) -> Optional[str]:
+        """使用 ffmpeg 将音频转码为 MP3"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.info(f"[{bvid}] 未检测到 ffmpeg，跳过转码")
+            return None
+
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i", input_path,
+            "-codec:a", "libmp3lame",
+            "-q:a", "2",
+            output_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                logger.info(f"[{bvid}] ffmpeg 转码 MP3 失败: {err[:300]}")
+                return None
+        except Exception as e:
+            logger.info(f"[{bvid}] ffmpeg 转码 MP3 异常: {e}")
+            return None
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+            logger.info(f"[{bvid}] 转码 MP3 输出过小，跳过使用")
+            return None
+
+        logger.info(f"[{bvid}] 转码 MP3 完成: {output_path}")
+        return output_path
 
     def _transcode_audio_to_wav(self, bvid: str, file_path: str) -> Optional[str]:
         """使用 ffmpeg 转码为 16k 单声道 wav，提高 ASR 兼容性"""
