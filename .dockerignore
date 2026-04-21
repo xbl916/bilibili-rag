@@ -26,11 +26,8 @@ assets/
 .DS_Store
 Thumbs.db
 
-# Docker
+# Docker (排除 docker-compose.yml 和 .dockerignore，但不排除构建需要的文件)
 docker-compose.yml
-Dockerfile
-nginx.conf
-start.sh
 .dockerignore
 
 # Node.js (前端构建会在 Docker 内部完成)
