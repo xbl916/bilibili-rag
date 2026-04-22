@@ -610,6 +610,81 @@ class BilibiliService:
         logger.debug(f"字幕解析完成，共 {len(texts)} 条，总长度 {len(result)} 字符")
         return result
 
+    async def get_video_play_url(self, bvid: str, cid: int, aid: int = None) -> Optional[str]:
+        """
+        获取视频播放 URL（用于视觉分析下载视频）
+        
+        Args:
+            bvid: 视频 BV 号
+            cid: 视频 cid
+            aid: 视频 aid (可选)
+            
+        Returns:
+            视频播放 URL
+        """
+        cookies = self._get_cookies()
+        
+        # 先获取视频信息以获取 aid
+        if not aid:
+            try:
+                video_info = await self.get_video_info(bvid)
+                aid = video_info.get("aid")
+            except Exception as e:
+                logger.debug(f"[{bvid}] 获取视频信息失败: {e}")
+        
+        # 构建 Cookie 请求头
+        cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        
+        # 尝试多种参数组合
+        param_sets = [
+            {"bvid": bvid, "cid": cid, "qn": 14, "fnval": 1},  # 最低画质，适合分析
+            {"aid": aid, "bvid": bvid, "cid": cid, "qn": 14, "fnval": 1},
+        ]
+        
+        for idx, params in enumerate(param_sets):
+            try:
+                url = f"{self.BASE_URL}/x/player/playurl"
+                request_headers = dict(self.HEADERS)
+                if cookie_header:
+                    request_headers["Cookie"] = cookie_header
+                    request_headers["Referer"] = "https://www.bilibili.com"
+                
+                response = await self.client.get(url, params=params, headers=request_headers)
+                
+                if response.status_code == 200 and response.text:
+                    data = response.json()
+                    if data.get("code") == 0:
+                        payload = data.get("data") or {}
+                        dash = payload.get("dash") or {}
+                        video_list = dash.get("video") or []
+                        
+                        if video_list:
+                            def _bw(item) -> int:
+                                value = item.get("bandwidth") or item.get("bandWidth") or 0
+                                try:
+                                    return int(value)
+                                except Exception:
+                                    return 0
+
+                            # 选择最低画质的视频
+                            candidates = [v for v in video_list if _bw(v) > 0]
+                            if candidates:
+                                best = min(candidates, key=_bw)
+                                video_url = best.get("baseUrl") or best.get("base_url") or best.get("url")
+                                logger.info(f"[{bvid}] 获取视频播放成功 (最低画质, bandwidth={_bw(best)})")
+                                return video_url
+                        
+                        # 尝试 durl
+                        durl = payload.get("durl") or []
+                        if durl:
+                            return durl[0].get("url")
+                            
+            except Exception as e:
+                logger.debug(f"[{bvid}] 参数组合 {idx+1} 异常: {e}")
+        
+        logger.warning(f"[{bvid}] 获取视频播放 URL 所有参数组合均失败")
+        return None
+
     async def download_audio_to_file(self, audio_url: str, file_path: str, cookies: dict = None) -> bool:
         """
         下载音频流到本地文件

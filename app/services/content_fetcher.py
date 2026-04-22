@@ -96,8 +96,7 @@ class ContentFetcher:
         # 如果启用了视觉分析，获取视觉分析结果
         vision_result = None
         if self.vision and settings.vision_enabled and content_text:
-            logger.warning(f"[{bvid}] 视觉分析功能待实现，跳过")
-            vision_result = None
+            vision_result = await self._try_vision_analysis(bvid, cid, title, video_info)
         
         # 返回成功获取的内容（字幕或 ASR）
         if content_text:
@@ -468,6 +467,51 @@ class ContentFetcher:
             
         except Exception as e:
             logger.warning(f"[{bvid}] 获取 AI 摘要失败: {e}")
+            return None
+    
+    async def _try_vision_analysis(
+        self, 
+        bvid: str, 
+        cid: int, 
+        title: str,
+        video_info: Optional[dict] = None
+    ) -> Optional[dict]:
+        """尝试进行视觉分析"""
+        try:
+            if not self.vision:
+                return None
+            
+            # 获取视频播放 URL
+            aid = video_info.get("aid") if video_info else None
+            video_url = await self.bili.get_video_play_url(bvid, cid, aid=aid)
+            
+            if not video_url:
+                logger.warning(f"[{bvid}] 无法获取视频播放 URL，跳过视觉分析")
+                return None
+            
+            # 获取视频时长
+            duration = video_info.get("duration", 600) if video_info else 600
+            
+            # 限制最大分析时长为 5 分钟（可配置）
+            duration_limit = min(duration, settings.max_video_duration)
+            logger.info(f"[{bvid}] 开始视觉分析，最大时长={duration_limit}s")
+            
+            # 使用整体视频分析
+            result = await self.vision.analyze_video_global(
+                video_url=video_url,
+                title=title,
+                duration_limit=duration_limit,
+            )
+            
+            if result:
+                logger.info(f"[{bvid}] 视觉分析完成")
+                return result
+            else:
+                logger.warning(f"[{bvid}] 视觉分析返回空结果")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"[{bvid}] 视觉分析失败: {e}")
             return None
     
     async def _try_subtitle(self, bvid: str, cid: int, video_info: Optional[dict] = None) -> Optional[str]:

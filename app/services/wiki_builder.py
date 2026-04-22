@@ -300,32 +300,34 @@ class WikiBuilder:
     
     async def _extract_entities(self, source: VideoSource) -> List[EntityPage]:
         """从视频内容中提取实体（工具、框架、人物等）"""
-        prompt = f"""请从以下视频内容中提取实体（工具、框架、技术、人物等）。
+        prompt = f"""你是一位知识管理专家。请从以下视频内容中提取提到的实体（工具、框架、技术、人物、组织等）。
 
 【重要】只输出纯 JSON 数组，不要输出任何其他文字、解释或 markdown 代码块标记。
 
 【视频标题】
 {source.title}
 
-【ASR 转写】
+【ASR 转写文本（前8000字）】
 {source.asr_text[:8000]}
 
 【视觉分析】
 {json.dumps(source.vision_analysis, ensure_ascii=False) if source.vision_analysis else "无"}
 
-要求：
-1. 提取 3-10 个核心实体
-2. 为每个实体提供类型和描述
-3. 输出为 JSON 格式：
+请提取 3-10 个核心实体，每个实体包含：
+1. name: 实体名称
+2. entity_type: 实体类型（工具/框架/技术/人物/组织/其他）
+3. description: 详细描述（50-150字，解释这个实体是什么、在视频中如何被提及）
+4. website: 官网 URL（如果有，没有则填 null）
+5. context_mentions: 视频中提到该实体的上下文摘录（1-2句）
+
+输出格式（JSON 数组，不要包含```json标记）：
 [
   {{
     "name": "实体名",
-    "entity_type": "工具/框架/技术/人物/其他",
-    "description": "简短描述",
-    "website": "官网 URL (如果有)",
-    "mentions": [
-      {{"timestamp": 10, "context": "提及的上下文"}}
-    ]
+    "entity_type": "工具",
+    "description": "详细描述",
+    "website": "https://example.com",
+    "context_mentions": ["上下文摘录"]
   }}
 ]
 """
@@ -452,22 +454,75 @@ class WikiBuilder:
         await self._write_page(path, merged)
         logger.info(f"更新实体页面：{path}")
     
-    def _create_video_summary(self, source: VideoSource) -> str:
-        """创建视频摘要页面"""
-        # 提取核心概念
+    async def _create_video_summary(self, source: VideoSource) -> str:
+        """创建视频摘要页面 - 使用 LLM 生成结构化摘要"""
+        try:
+            # 使用 LLM 生成视频摘要
+            summary_prompt = f"""请为以下视频生成结构化的摘要内容。
+
+【视频标题】
+{source.title}
+
+【ASR 转写（前3000字）】
+{source.asr_text[:3000]}
+
+请生成以下内容（JSON 格式，不要包含```json标记）：
+{{
+    "content_summary": "精炼的内容摘要（500字以内），要有条理地组织，不要直接粘贴原始转写",
+    "key_topics": ["主题1", "主题2", "主题3"],
+    "core_concepts": [
+        {{"name": "概念名", "timestamp": "提及位置"}}
+    ],
+    "visual_content": "关键视觉内容描述（如果有）",
+    "related_entities": ["实体1", "实体2"]
+}}
+"""
+            llm_response = await self._call_llm(summary_prompt, force_json=True)
+            summary_data = self._parse_json_response(llm_response)
+            
+            if summary_data:
+                # 构建核心概念列表
+                core_concepts = []
+                if summary_data.get("core_concepts"):
+                    for cc in summary_data["core_concepts"][:5]:
+                        ts = cc.get("timestamp", "N/A")
+                        core_concepts.append(f"- [{cc['name']}](../../concepts/{cc['name']}.md) @ {ts}")
+                
+                # 关键视觉内容
+                visual_content = summary_data.get("visual_content", "暂无") or "暂无"
+                
+                # 相关实体
+                related_entities = []
+                if summary_data.get("related_entities"):
+                    for re_item in summary_data["related_entities"][:5]:
+                        related_entities.append(f"- [{re_item}](../../entities/{re_item}.md)")
+                
+                content = self.VIDEO_TEMPLATES["default"].format(
+                    title=source.title,
+                    bvid=source.bvid,
+                    up_owner=source.meta.get("up_owner", "未知 UP 主") if source.meta else "未知 UP 主",
+                    ingest_time=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    content_summary=summary_data.get("content_summary", source.asr_text[:2000]),
+                    core_concepts="\n".join(core_concepts) if core_concepts else "暂无",
+                    visual_content=visual_content,
+                    related_entities="\n".join(related_entities) if related_entities else "暂无"
+                )
+                return content
+        except Exception as e:
+            logger.warning(f"LLM 摘要生成失败，使用原始 ASR 文本：{e}")
+        
+        # 降级：使用原始 ASR 文本
         core_concepts = []
         if source.vision_analysis and "concepts" in source.vision_analysis:
             for c in source.vision_analysis["concepts"][:5]:
                 core_concepts.append(f"- [{c['name']}](../../concepts/{c['name']}.md) @ {c.get('timestamp', 'N/A')}s")
         
-        # 关键视觉内容
         visual_content = "暂无"
         if source.vision_analysis and "visual_highlights" in source.vision_analysis:
             visual_content = "\n".join([
                 f"- {h}" for h in source.vision_analysis["visual_highlights"][:5]
             ])
         
-        # 相关实体
         related_entities = []
         if source.vision_analysis and "entities" in source.vision_analysis:
             for e in source.vision_analysis["entities"][:3]:
@@ -507,6 +562,131 @@ class WikiBuilder:
         
         logger.info(f"更新索引：{index_path}")
     
+    async def rebuild_index(self):
+        """重建完整的索引（扫描所有页面并提取摘要）"""
+        index_path = os.path.join(self.wiki_dir, "index.md")
+        index = self._create_initial_index()
+        
+        # 重建概念索引
+        concepts_dir = os.path.join(self.wiki_dir, "concepts")
+        if os.path.exists(concepts_dir):
+            concepts = []
+            for filename in sorted(os.listdir(concepts_dir)):
+                if filename.endswith(".md"):
+                    filepath = os.path.join(concepts_dir, filename)
+                    content = self._load_file_content(filepath)
+                    if content:
+                        title = self._extract_title(content)
+                        summary = self._extract_summary(content)
+                        concepts.append((title, filename, summary))
+            index = self._update_index_with_summaries(index, "concepts", concepts)
+        
+        # 重建实体索引
+        entities_dir = os.path.join(self.wiki_dir, "entities")
+        if os.path.exists(entities_dir):
+            entities = []
+            for filename in sorted(os.listdir(entities_dir)):
+                if filename.endswith(".md"):
+                    filepath = os.path.join(entities_dir, filename)
+                    content = self._load_file_content(filepath)
+                    if content:
+                        title = self._extract_title(content)
+                        summary = self._extract_summary(content)
+                        entities.append((title, filename, summary))
+            index = self._update_index_with_summaries(index, "entities", entities)
+        
+        # 重建视频索引
+        videos_dir = os.path.join(self.wiki_dir, "videos")
+        if os.path.exists(videos_dir):
+            videos = []
+            for filename in sorted(os.listdir(videos_dir)):
+                if filename.endswith(".md"):
+                    filepath = os.path.join(videos_dir, filename)
+                    content = self._load_file_content(filepath)
+                    if content:
+                        title = self._extract_title(content)
+                        summary = self._extract_summary(content)
+                        bvid = filename.replace(".md", "")
+                        videos.append((title, filename, summary, bvid))
+            index = self._update_index_with_video_summaries(index, "videos", videos)
+        
+        with open(index_path, 'w', encoding='utf-8') as f:
+            f.write(index)
+        
+        logger.info(f"重建索引完成")
+    
+    def _load_file_content(self, path: str) -> Optional[str]:
+        """加载文件内容"""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            logger.warning(f"读取文件失败 [{path}]: {e}")
+            return None
+    
+    def _extract_summary(self, content: str, max_chars: int = 200) -> str:
+        """从 Markdown 内容中提取摘要（前2-3段非空文本）"""
+        lines = content.split('\n')
+        summary_parts = []
+        current_len = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # 跳过标题行（# 开头）和表格行
+            if stripped.startswith('#') or stripped.startswith('|'):
+                continue
+            # 跳过列表项（- 开头）的前几条，只取正文段落
+            if stripped.startswith('-'):
+                continue
+            
+            if current_len + len(stripped) > max_chars:
+                summary_parts.append(stripped[:max_chars - current_len])
+                break
+            
+            summary_parts.append(stripped)
+            current_len += len(stripped) + 1
+            
+            if current_len >= max_chars:
+                break
+        
+        return ' '.join(summary_parts) if summary_parts else "暂无摘要"
+    
+    def _update_index_with_summaries(self, index: str, section: str, items: List[tuple]) -> str:
+        """使用带摘要的格式更新索引部分"""
+        import re
+        
+        # 找到对应部分
+        pattern = rf"(## {section}\n>.*?\n)(.*?)(\n## |\n---|\Z)"
+        
+        new_content = f"\n"
+        for item in items:
+            title, filename, summary = item
+            page_name = filename.replace(".md", "")
+            new_content += f"- **[{title}]({section}/{filename})** - {summary}\n"
+        
+        new_content += "\n"
+        
+        replacement = rf"\1{new_content}"
+        return re.sub(pattern, replacement, index, flags=re.DOTALL)
+    
+    def _update_index_with_video_summaries(self, index: str, section: str, items: List[tuple]) -> str:
+        """使用带摘要的格式更新视频索引部分"""
+        import re
+        
+        pattern = rf"(## {section}\n>.*?\n)(.*?)(\n## |\n---|\Z)"
+        
+        new_content = f"\n"
+        for item in items:
+            title, filename, summary, bvid = item
+            new_content += f"- **[{title}](videos/{filename})** - {summary}\n"
+        
+        new_content += "\n"
+        
+        replacement = rf"\1{new_content}"
+        return re.sub(pattern, replacement, index, flags=re.DOTALL)
+    
     def _create_initial_index(self) -> str:
         """创建初始索引"""
         return """# Bilibili RAG Wiki
@@ -519,13 +699,19 @@ class WikiBuilder:
 
 ## 概念
 
+> 概念页面存储视频中的核心知识点，包含定义、要点和相关视频。
+
 （概念页面将自动添加到这里）
 
 ## 实体
 
+> 实体页面存储视频中提到的人、工具、框架、技术等。
+
 （实体页面将自动添加到这里）
 
 ## 视频
+
+> 视频页面包含内容摘要、核心概念和关键视觉内容。
 
 （视频页面将自动添加到这里）
 
@@ -646,40 +832,51 @@ class WikiBuilder:
     def _build_concept_extraction_prompt(self, source: VideoSource) -> str:
         """构建概念提取提示词"""
         vision_text = ""
-        if source.vision_analysis:
+        if source.vision_analysis and source.vision_analysis.get("concepts"):
             vision_text = f"""
 
 【视觉分析】
 {json.dumps(source.vision_analysis, ensure_ascii=False, indent=2)}
 """
         
-        return f"""请从以下视频内容中提取关键概念和知识点。
+        return f"""你是一位知识管理专家。请从以下视频内容中提取关键概念和知识点，构建结构化的知识库。
 
 【重要】只输出纯 JSON 数组，不要输出任何其他文字、解释或 markdown 代码块标记。
 
 【视频标题】
 {source.title}
 
-【ASR 转写】
-{source.asr_text[:10000]}{vision_text}
+【视频简介】
+{source.meta.get("description", "无") if source.meta else "无"}
 
-要求：
-1. 提取 3-10 个核心概念
-2. 为每个概念提供清晰的定义
-3. 标注概念在视频中的出现位置（时间戳，秒）
-4. 识别概念之间的关系（交叉引用）
-5. 评估概念的重要性（high/medium/low）
-6. 输出为 JSON 格式，不要包含```json标记：
+【ASR 转写文本（前8000字）】
+{source.asr_text[:8000]}{vision_text}
+
+请提取 3-10 个核心概念，每个概念包含：
+1. name: 概念名称（简洁准确）
+2. definition: 详细定义（100-200字，解释这个概念是什么、为什么重要）
+3. core_points: 核心要点（3-5个要点，用简洁的语言概括关键信息）
+4. context_mentions: 视频中提到该概念的关键上下文（2-3句原文摘录）
+5. related_concepts: 相关概念名称列表（从视频内容中推断，0-3个）
+6. importance: 重要性（high/medium/low）
+
+输出格式（JSON 数组，不要包含```json标记）：
 [
   {{
     "name": "概念名",
-    "definition": "定义",
-    "core_points": ["要点 1", "要点 2"],
-    "timestamps": [10, 25, 45],
-    "related_concepts": ["相关概念 1", "相关概念 2"],
+    "definition": "详细定义",
+    "core_points": ["要点 1", "要点 2", "要点 3"],
+    "context_mentions": ["关键上下文摘录1", "关键上下文摘录2"],
+    "related_concepts": ["相关概念1", "相关概念2"],
     "importance": "high"
   }}
 ]
+
+要求：
+- 定义要准确、完整，不要过于简短
+- 核心要点要具体，不要泛泛而谈
+- 尽可能识别概念之间的关系
+- 如果视频涉及多个领域，每个领域至少提取一个核心概念
 """
     
     async def _update_video_references(self, concept_name: str, source: VideoSource):
